@@ -1,979 +1,292 @@
+# ============================================================
+# Single-cell ATAC-seq Analysis
+# Chromatin accessibility analysis of immune-cell populations from COVID-19 and healthy samples
+# Author: Sakshi Parate - M.Sc. Bioinformatics, Saarland University
+# Reference genome: hg38
+# ============================================================
 
-# Sakshi Parate - 7073022
-
-BiocManager::install("GreenleafLab/motifmatchr")
-
-system("/opt/homebrew/Cellar/gcc/14.2.0_1/bin/g++-14 --version")
-BiocManager::install("chromVAR", force = TRUE)
-
-BiocManager::install("ge11232002/TFBSTools")
-BiocManager::install("GreenleafLab/chromVARmotifs")
-
-if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-devtools::install_github("GreenleafLab/ArchR", ref="master", repos = BiocManager::repositories())
-
-library(ArchR) #run archr
-ArchR::installExtraPackages()
-install.packages("Cairo")
-capabilities("cairo")
-
-remotes::install_github(
-  "GreenleafLab/ArchR",
-  ref = "master",
-  repos = BiocManager::repositories()
-)
-
-#Week 1
-
-#1 Preprocessing and quality control
-
-#1.1 Set up the environment
-
-setwd("~/Pictures/sakshi")
+# 1. Load Packages
+required_packages <- c("ArchR","ggplot2","dplyr","Seurat","hexbin")
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly=TRUE)]
+if(length(missing_packages)>0) stop(paste("The following packages are missing:",paste(missing_packages,collapse=", "),"\nInstall them before running this analysis."))
+library(ArchR); library(ggplot2); library(dplyr); library(Seurat); library(grid)
 set.seed(42)
-addArchRGenome("hg38")
-addArchRThreads(threads = 1) 
-
-data_dir <- "~/Pictures/sakshi/p2_updated/project_2"
-inputFiles <- list.files(data_dir, pattern = "*.tsv.gz", full.names = TRUE)
-
-sampleNames <- gsub(pattern = ".tsv.gz", replacement = "", basename(inputFiles))
-print(sampleNames)
-
-#1.2 Read the data into an appropriate data structure and apply filtering
-
-ArrowFiles <- createArrowFiles( # create arrowfiles from .tsv.gz
-  inputFiles = inputFiles,
-  sampleNames = sampleNames,  
-  minTSS = 5,
-  minFrags = 550,
-  addTileMat = TRUE,
-  addGeneScoreMat = TRUE
-) 
-
-ArrowFiles <- list.files("~/Pictures/sakshi", pattern = "arrow$", full.names = TRUE)
-ArrowFiles
-
-proj <- ArchRProject(
-  ArrowFiles = ArrowFiles,  
-  outputDirectory = "ArchRProject"   #create archr project using arrowfiles
-)
-proj
-
-#1.3 Identify doublets
-
-proj <- addDoubletScores(  #asign doublet score
-  input = proj,
-  k = 10,               
-  knnMethod = "UMAP",   
-  LSIMethod = 1         
-)
-proj
-
-doubletEnrichment <- proj$DoubletEnrichment 
-doubletEnrichment
-doubletFilter <- doubletEnrichment < 2 # adjust thresold 
-doubletFilter
-filteredProj <- proj[doubletFilter, ]# filter archr project to exculde doublet
-filteredProj
-
-#1.4 Collect all samples into a joint data structure
-
-num_cells <- nCells(proj).  # Collect project statistics
-num_cells
-median_TSS <- median(proj$TSSEnrichment)
-median_TSS
-median_fragments <- median(proj$nFrags)
-median_fragments
-tile_dimensions <- dim(getMatrixFromProject(proj, useMatrix = "TileMatrix", binarize = TRUE))
-tile_dimensions
-
-filtered_num_cells <- nCells(filteredProj)
-filtered_num_cells
-filtered_median_TSS <- median(filteredProj$TSSEnrichment)
-filtered_median_TSS
-filtered_median_fragments <- median(filteredProj$nFrags)
-filtered_median_fragments
-filtered_tile_dimensions <- dim(getMatrixFromProject(filteredProj, useMatrix = "TileMatrix", binarize = TRUE))
-filtered_tile_dimensions
-
-#1.5 Quality control
-table(proj$Sample)
-
-plotFragmentSizes(proj)
-
-plotTSSEnrichment(ArchRProj = proj, groupBy = "Sample")
-
-library(ggplot2)
-library(dplyr)
-
-# extract metadata
-df <- as.data.frame(getCellColData(proj, select = c("Sample", "nFrags", "TSSEnrichment")))
-df$FragBin <- cut( # create frag count bins
-  df$nFrags,
-  breaks = c(0, 1000, 3000, 6000, 10000, Inf),
-  labels = c("<1k", "1–3k", "3–6k", "6–10k", ">10k"),
-  include.lowest = TRUE
-)
-
-p <- ggplot(df, aes(x = FragBin, y = TSSEnrichment, fill = Sample)) + # violin plot for tss enrichment vs frag bins by sample
-  geom_violin(trim = TRUE, alpha = 0.6) +
-  geom_boxplot(width = 0.1, outlier.size = 0.3) +
-  facet_wrap(~ Sample) +
-  theme_minimal() +
-  labs(
-    title = "Fragments vs TSS Enrichment per Sample (Violin Plot)",
-    x = "Fragment Count (Binned)",
-    y = "TSS Enrichment"
-  ) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-print(p)
-
-df <- as.data.frame(getCellColData(proj, select = c("Sample", "nFrags", "TSSEnrichment"))) # scatter plot for number of frag vs tss enrichment
-samples <- unique(df$Sample)
-for (s in samples) {
-  dsub <- subset(df, Sample == s)
-  p <- ggplot(dsub, aes(x = nFrags, y = TSSEnrichment)) +
-    geom_point(alpha = 0.35, size = 0.6) +
-    scale_x_log10() +
-    theme_minimal() +
-    labs(
-      title = paste0("Number of Fragments vs TSS Enrichment — ", s),
-      x = "Number of fragments (log10)",
-      y = "TSS enrichment"
-    )
-  print(p)                                    # display in R
-  ggsave(filename = paste0(gsub("[^A-Za-z0-9_\\-]", "_", s), "_frags_vs_TSS.png"),
-         plot = p, width = 6, height = 4, dpi = 300)
-}
-
-#1.5 Filter the dataset
-strict_filteredProj <- filteredProj[
-  filteredProj$TSSEnrichment > 8 &
-    filteredProj$nFrags > 3000,
-]
-strict_filteredProj
-
-nCells(strict_filteredProj) # num of cells
-
-median(strict_filteredProj$TSSEnrichment) # median tss
-
-median(strict_filteredProj$nFrags) # median fragments
-
-strict_tile_dimensions <- dim( # tile set dimension
-  getMatrixFromProject(strict_filteredProj, useMatrix = "TileMatrix", binarize = TRUE)
-)
-strict_tile_dimensions
-
-#Week 2
-
-#2 Peaks
-
-#2.1 Peak calling
-
-pathToMacs2 <- "/home/sakshi/miniconda3/envs/macs2_fix/bin/macs2"
-
-proj_peaks <- strict_filteredProj
-
-groupBy <- "Sample"
-
-proj_peaks <- addGroupCoverages( #create pseudo bulk coverages
-  ArchRProj = proj_peaks,
-  groupBy = groupBy
-)
-
-proj_peaks <- addReproduciblePeakSet( #call peaks using mac2
-  ArchRProj = proj_peaks,
-  groupBy = groupBy,
-  pathToMacs2 = pathToMacs2
-)
-proj_peaks <- addPeakMatrix(proj_peaks) #add peak matrix
-
-head(peak_set)
-table(peak_set$sample)
-head(peak_set)
-gene_score_matrix <- getMatrixFromProject(proj_peaks, useMatrix = "GeneScoreMatrix")
-head(gene_score_matrix)  # chek data structure
-
-proj_peaks <- addPeakMatrix(proj_peaks)
-getAvailableMatrices(proj_peaks)
-peak_matrix <- getMatrixFromProject(proj_peaks, useMatrix = "PeakMatrix")
-head(peak_matrix)
-peak_matrix_df <- as.data.frame(assay(peak_matrix, "PeakMatrix"))
-head(peak_matrix_df)
-print(peak_matrix_df)
-
-length(getPeakSet(proj_peaks))
-
-#2.1 Cluster marker peaks
-
-proj_peaks <- addIterativeLSI( #cluster marker peaks param
-  ArchRProj = proj_peaks,
-  useMatrix = "TileMatrix",
-  name = "IterativeLSI",
-  iterations = 2,
-  clusterParams = list(
-    resolution = c(0.2),
-    sampleCells = 10000,
-    n.start = 10
-  ),
-  varFeatures = 25000,
-  dimsToUse = 1:30
-)
-
-proj_peaks <- addClusters(
-  input = proj_peaks,
-  reducedDims = "IterativeLSI",
-  name = "Clusters",
-  resolution = 0.8
-)
-
-proj_peaks <- addUMAP(
-  ArchRProj = proj_peaks,
-  reducedDims = "IterativeLSI",
-  name = "UMAP",
-  nNeighbors = 30,
-  minDist = 0.5,
-  metric = "cosine"
-)
-
-p1 <- plotEmbedding(proj_peaks, colorBy = "cellColData", name = "Clusters")
-p1
-
-markerPeaks <- getMarkerFeatures( #heatmap showing accessibility
-  ArchRProj = proj_peaks,
-  useMatrix = "PeakMatrix",
-  groupBy = "Clusters",
-  bias = c("TSSEnrichment", "nFrags"),
-  testMethod = "wilcoxon"
-)
-
-markerList <- getMarkers(
-  markerPeaks,
-  cutOff = "FDR <= 0.01 & Log2FC >= 1"
-)
-
-heatmap <- markerHeatmap(
-  seMarker = markerPeaks,
-  cutOff = "FDR <= 0.01 & Log2FC >= 1",
-  transpose = TRUE
-)
-heatmap
-
-library(grid) #plots around gnes
-
-genes_to_plot <- c("CD8A", "CD14", "GATA1", "PAX5", "TBX21")
-
-for (gene in genes_to_plot) {
-  
-  p <- plotBrowserTrack(
-    ArchRProj = proj_peaks,
-    groupBy = "Clusters",
-    geneSymbol = gene,
-    upstream = 50000,
-    downstream = 50000,
-    loops = NULL
-  )
-  
-  grid::grid.newpage()
-  grid::grid.draw(p[[1]])
-}
-
-library(grid)
-
-plot_CD8A <- plotBrowserTrack(
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters",
-  geneSymbol = "CD8A",
-  upstream = 50000,
-  downstream = 50000
-)
-
-plot_CD14 <- plotBrowserTrack(
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters",
-  geneSymbol = "CD14",
-  upstream = 50000,
-  downstream = 50000
-)
-
-plot_GATA1 <- plotBrowserTrack(
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters",
-  geneSymbol = "GATA1",
-  upstream = 50000,
-  downstream = 50000
-)
-
-plot_PAX5 <- plotBrowserTrack(
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters",
-  geneSymbol = "PAX5",
-  upstream = 50000,
-  downstream = 50000
-)
-
-plot_TBX21 <- plotBrowserTrack(
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters",
-  geneSymbol = "TBX21",
-  upstream = 50000,
-  downstream = 50000
-)
-
-grid.newpage()
-grid.draw(plot_CD8A[[1]])
-grid.text("Gene: CD8A", x = 0.5, y = 0.95, gp = gpar(fontsize = 14, fontface = "bold", col = "blue"))
-
-grid.newpage()
-grid.draw(plot_CD14[[1]])
-grid.text("Gene: CD14", x = 0.5, y = 0.95, gp = gpar(fontsize = 14, fontface = "bold", col = "blue"))
-
-grid.newpage()
-grid.draw(plot_GATA1[[1]])
-grid.text("Gene: GATA1", x = 0.5, y = 0.95, gp = gpar(fontsize = 14, fontface = "bold", col = "blue"))
-
-grid.newpage()
-grid.draw(plot_PAX5[[1]])
-grid.text("Gene: PAX5", x = 0.5, y = 0.95, gp = gpar(fontsize = 14, fontface = "bold", col = "blue"))
-
-grid.newpage()
-grid.draw(plot_TBX21[[1]])
-grid.text("Gene: TBX21", x = 0.5, y = 0.95, gp = gpar(fontsize = 14, fontface = "bold", col = "blue"))
-
-#3 Dimensionality Reduction 
-
-#3.1 Iterative LSI
-
-#3.1 UMAP with sample annotation and QC metrics
-
-proj_peaks <- addUMAP(
-  ArchRProj = proj_peaks,
-  reducedDims = "IterativeLSI",
-  name = "UMAP",
-  nNeighbors = 30,
-  minDist = 0.5,
-  metric = "cosine",
-  force = TRUE
-)
-
-plot_sample <- plotEmbedding( #color by sample
-  ArchRProj = proj_peaks, 
-  colorBy = "cellColData", 
-  name = "Sample",
-  embedding = "UMAP"
-)
-plot_sample
-
-install.packages("hexbin")
-
-plot_tss <- plotEmbedding( #color by tss enrichment
-  ArchRProj = proj_peaks, 
-  colorBy = "cellColData", 
-  name = "TSSEnrichment",
-  embedding = "UMAP"
-)
-plot_tss
-
-plot_fragments <- plotEmbedding( #color by number of fragments
-  ArchRProj = proj_peaks, 
-  colorBy = "cellColData", 
-  name = "nFrags",
-  embedding = "UMAP"
-)
-plot_fragments
-
-plot_sample + ggtitle("UMAP Colored by Sample")
-plot_tss + ggtitle("UMAP Colored by TSS Enrichment")
-plot_fragments + ggtitle("UMAP Colored by Number of Fragments")
-
-#3.2 Dealing with batch effects
-
-proj_peaks <- addHarmony( #deALIng with batch effects
-  ArchRProj = proj_peaks,
-  reducedDims = "IterativeLSI",
-  name = "Harmony",
-  groupBy = "Sample"
-)
-
-proj_peaks <- addUMAP(
-  ArchRProj = proj_peaks,
-  reducedDims = "Harmony",
-  name = "UMAP_Harmony",
-  nNeighbors = 30,
-  minDist = 0.5,
-  metric = "cosine",
-  force = TRUE
-)
-
-umap_sample_harmony <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "cellColData",
-  name = "Sample",
-  embedding = "UMAP_Harmony"
-)
-umap_sample_harmony
-
-umap_tss_harmony <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "cellColData",
-  name = "TSSEnrichment",
-  embedding = "UMAP_Harmony"
-)
-umap_tss_harmony
-
-umap_frag_harmony <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "cellColData",
-  name = "nFrags",
-  embedding = "UMAP_Harmony"
-)
-umap_frag_harmony
-
-#4 Clustering 
-
-proj_peaks <- addClusters( #clustering
-  input = proj_peaks,
-  reducedDims = "IterativeLSI",
-  method = "Seurat",     # use seurat lovain clustering
-  name = "Clusters_Louvain",
-  resolution = 0.8
-)
-
-p_clusters <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "cellColData",
-  name = "Clusters_Louvain",
-  embedding = "UMAP"
-)
-p_clusters
-
-cluster_cell_counts <- table(proj_peaks$Clusters_Louvain)
-cluster_cell_counts
-
-table(proj_peaks$Clusters_Louvain, proj_peaks$Sample)
-
-#Week 3
-
-#5 Gene activity
-
-#5.1 Compute gene activity scores
-
-if (!"GeneScoreMatrix" %in% getAvailableMatrices(proj_peaks)) { #check if GeneScoreMatrix already exists
-  proj_peaks <- addGeneScoreMatrix(
-    ArchRProj = proj_peaks,
-    matrixName = "GeneScoreMatrix"
-  )
-} else {
-  message("Gene activity scores already computed.")
-}
-
-GeneScoreMatrix <- getMatrixFromProject( #extract GeneScoreMatrix
-  ArchRProj = proj_peaks,
-  useMatrix = "GeneScoreMatrix"
-)
-GeneScoreMatrix
-
-#5.2 Identify Marker Genes
-
-markersGene <- getMarkerFeatures( #identify marker genes from GeneScoreMatrix
-  ArchRProj = proj_peaks, 
-  useMatrix = "GeneScoreMatrix", 
-  groupBy = "Clusters",  #grouping by clusters to find cluster specific markers
-  bias = c("TSSEnrichment", "log10(nFrags)"),  #correcting for biases in tss enrichment n frag count
-  testMethod = "wilcoxon"  #using the wilcoxon test for differential accessibility
-)
-markersGene #show identified marker genes
-
-markerList <- getMarkers( #apply cutoffs to get list of significant marker genes
-  seMarker = markersGene, 
-  cutOff = "FDR <= 0.05 & Log2FC >= 1"  # FDR <= 0.05 and Log2 fold change >= 1 for significant markers
-)
-markerList #display top markers
-
-print(markerList$C1) #view marker genes for specific cluster
-print(markerList$C2)
-print(markerList$C3)
-print(markerList$C4)
-print(markerList$C5)
-print(markerList$C6)
-print(markerList$C7)
-
-#5.3 Using MAGIC
-
-topGenes_C1 <- markerList$C1$name[1:5] #define top 5 marker genes for each cluster 
-topGenes_C2 <- markerList$C2$name[1:5]
-topGenes_C3 <- markerList$C3$name[1:5]
-topGenes_C4 <- markerList$C4$name[1:5]
-topGenes_C5 <- markerList$C5$name[1:5]
-topGenes_C6 <- markerList$C6$name[1:5]
-topGenes_C7 <- markerList$C7$name[1:5]
-
-umap_withoutMagic_C1 <- plotEmbedding( #create umap without magic
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C1,  #top genes for cluster c1
-  embedding = "UMAP_Harmony"  #umap with harmony correction, no magic smoothing
-)
-
-umap_withoutMagic_C2 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C2,  #top genes for cluster c2
-  embedding = "UMAP_Harmony"
-)
-
-umap_withoutMagic_C3 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C3,  #top genes for cluster c3
-  embedding = "UMAP_Harmony"
-)
-
-umap_withoutMagic_C4 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C4,  #top genes for cluster c4
-  embedding = "UMAP_Harmony"
-)
-
-umap_withoutMagic_C5 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C5,  #top genes for cluster c5
-  embedding = "UMAP_Harmony"
-)
-
-umap_withoutMagic_C6 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C6,  #top genes for cluster c6
-  embedding = "UMAP_Harmony"
-)
-
-umap_withoutMagic_C7 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C7,  #top genes for cluster c7
-  embedding = "UMAP_Harmony"
-)
-
-proj_peaks <- addImputeWeights(proj_peaks) #add imputation weights for magic
-
-umap_withMagic_C1 <- plotEmbedding( #create umap with magic
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C1,  #top genes for cluster c1
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C2 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C2,  #top genes for cluster c2
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C3 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C3,  #top genes for cluster c3
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C4 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C4,  #top genes for cluster c4
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C5 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C5,  #top genes for cluster c5
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C6 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C6,  #top genes for cluster c6
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withMagic_C7 <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneScoreMatrix",
-  name = topGenes_C7,  #top genes for cluster c7
-  embedding = "UMAP_Harmony",
-  imputeWeights = getImputeWeights(proj_peaks)
-)
-
-umap_withoutMagic_C1  #display umap for cluster c1 without magic
-umap_withMagic_C1  #display umap for cluster c1 with magic
-
-umap_withoutMagic_C2  #display umap for cluster c2 without magic
-umap_withMagic_C2  #display umap for cluster c2 with magic
-
-umap_withoutMagic_C3  #display umap for cluster c3 without magic
-umap_withMagic_C3  #display umap for cluster c3 with magic
-
-umap_withoutMagic_C4  #display umap for cluster c4 without magic
-umap_withMagic_C4  #display umap for cluster c4 with magic
-
-umap_withoutMagic_C5  #display umap for cluster c5 without magic
-umap_withMagic_C5  #display umap for cluster c5 with magic
-
-umap_withoutMagic_C6  #display umap for cluster c6 without magic
-umap_withMagic_C6  #display umap for cluster c6 with magic
-
-umap_withoutMagic_C7  #display umap for cluster c7 without magic
-umap_withMagic_C7  #display umap for cluster c7 with magic
-
-#6 Transcription Factor motif activity
-
-#6.1 Compute TF motif activity
-proj_peaks <- addMotifAnnotations(
-  ArchRProj = proj_peaks,
-  motifSet = "cisbp",  
-  name = "Motif"       
-)
-
-print(getPeakAnnotation(proj_peaks, "Motif"))
-
-proj_peaks <- addBgdPeaks(proj_peaks)
-
-proj_peaks <- addDeviationsMatrix(
-  ArchRProj = proj_peaks,
-  peakAnnotation = "Motif",
-  force = TRUE
-)
-
-#6.2 Plot UMAP embeddings for marker TFs
-
-var_motifs <- getVarDeviations( #get variability scores for motifs
-  ArchRProj = proj_peaks, 
-  name = "MotifMatrix",  #this is matrix that contains motif activity scores
-  plot = FALSE  #do not plot variability of all motifs yet
-)
-
-Top_var_motifs <- head(var_motifs, 2) #identify the most variable motifs top 2
-top_names <- Top_var_motifs$name
-
-markerMotifs <- getFeatures(proj_peaks, select = paste(top_names, collapse="|"), useMatrix = "MotifMatrix") #retrieve motifs for top 2 most variable TFs
-
-markerMotifs_filtered <- grep("^z:", markerMotifs, value = TRUE) #filter motifs to remove unwanted entries
-
-for (motif in markerMotifs_filtered) { #ensure each plot is displayed separately
-  plot <- plotEmbedding(   #plot motif activity on umap
-    ArchRProj = proj_peaks,
-    colorBy = "MotifMatrix",  #use motif activity scores
-    name = motif,             #specify motif name to highlight
-    embedding = "UMAP_Harmony" #specify embedding to use 
-  )
-  dev.new()  #this will open a new graphics window for each plot 
-  print(plot)
-}
-
-#6.3 Motif activity
-
-table(proj_peaks$Clusters_Louvain)
-
-for (motif in markerMotifs_filtered) {
-  plot <- plotGroups(
-    ArchRProj = proj_peaks,
-    groupBy = "Clusters_Louvain",
-    colorBy = "MotifMatrix",
-    name = motif,
-    plotAs = "violin"
-  )
-  print(plot)
-}
-
-#7 Integration with gene expression
-
-#7.1 Data integration
-
-seurat_data <- readRDS( #load annotated scRNAseq data
-  "~/Pictures/sakshi/blish_awilk_seu_subset.rds"
-)
-seurat_data
-
-colnames(seurat_data@meta.data)
-
-proj_peaks <- addGeneIntegrationMatrix(
-  ArchRProj = proj_peaks,
-  useMatrix = "GeneScoreMatrix",
-  matrixName = "GeneIntegrationMatrix",
-  reducedDims = "Harmony",
-  seRNA = seurat_data,
-  groupRNA = "cell.type",
-  nameCell = "predictedCell_Un",
-  nameGroup = "predictedGroup_Un",
-  nameScore = "predictedScore_Un",
-  force = TRUE
-)
-
-markerGenes <- c("PAX5", "OLIG2", "EGR1")
-
-umap_plots <- plotEmbedding(
-  ArchRProj = proj_peaks,
-  colorBy = "GeneIntegrationMatrix",
-  name = markerGenes,
-  embedding = "UMAP_Harmony"
-)
-umap_plots$PAX5
-umap_plots$EGR1
-umap_plots$OLIG2
-
-#7.2 Correlation Coefficients
-
-cor_results <- correlateMatrices(
-  ArchRProj = proj_peaks,
-  useMatrix1 = "GeneIntegrationMatrix",  # scRNA-seq expression
-  useMatrix2 = "GeneScoreMatrix"         # scATAC-seq gene activity
-)
-
-head(cor_results) #inspect the result
-summary(cor_results$cor)
-
-highest_agreement <- cor_results[which.max(cor_results$cor), ] #genes with highest agreement
-
-lowest_agreement <- cor_results[which.min(cor_results$cor), ] #genes with lowest agreement
-
-print("Gene with highest agreement:")
-highest_agreement
-
-print("Gene with lowest agreement:")
-lowest_agreement
-
-#7.3 Cluster labels from gene expression
-
-plotEmbedding( #visualize RNA inferred cell type labels on atac umap
-  ArchRProj = proj_peaks,
-  colorBy = "cellColData",
-  name = "predictedGroup_Un",
-  embedding = "UMAP_Harmony"
-)
-
-proj_peaks$Clusters_RNA <- proj_peaks$predictedGroup_Un #assign rna inferred cell type labels to atac cells
-
-confusion_matrix <- table( #compute confusion matrix between atac clusters n rna labels
-  ATAC_Clusters = proj_peaks$Clusters_Louvain,
-  RNA_Labels = proj_peaks$predictedGroup_Un
-)
-
-print(confusion_matrix) #display confusion matrix
-
-#8 Peak-gene linkage
-
-proj_peaks <- addPeak2GeneLinks( #compute peak to gene links using chromatin accessibility n gene expression
-  ArchRProj = proj_peaks,
-  reducedDims = "Harmony"   #use batch corrected low dimensional space
-)
-
-peak2gene_links <- getPeak2GeneLinks( #retrieve significant peak gene links
-  ArchRProj = proj_peaks,
-  corCutOff = 0.5,        #correlation threshold
-  resolution = 10000     #10 kb resolution
-)
-peak2gene_links[[1]] #inspect first linked peak gene pairs
-
-peak_gene_heatmap <- plotPeak2GeneHeatmap( #plot side by side heatmaps
-  ArchRProj = proj_peaks
-)
-peak_gene_heatmap #display heatmap
-
-#Week 4
-
-#9 Differential accessibility 
-
-#9.1 Differential peak accessibility
-
-colnames(getCellColData(proj_peaks))
+
+# 2. Analysis Configuration
+data_dir <- "data"; results_dir <- "results"
+dir.create(results_dir,showWarnings=FALSE,recursive=TRUE)
+addArchRGenome("hg38"); addArchRThreads(threads=1)
+lsi_dims <- 1:30; downstream_lsi_dims <- 2:30
+genes_of_interest <- c("CD8A","CD14","GATA1","PAX5","TBX21")
+integration_genes <- c("PAX5","EGR1","OLIG2")
+marker_genes <- c("CD34","GATA1","PAX5","MS4A1","MME","CD14","MPO","IRF8","CD3D","CD8A","CD4","TBX21","CD3G","NCAM1","FCGR3A","FOXP3","GATA3","RORC","PDCD1","HLA-DRA","CD28","IL2RA","CD69","CD44","CCR7")
+
+# 3. Data Import and Quality Control
+input_files <- list.files(data_dir,pattern="\\.tsv\\.gz$",full.names=TRUE)
+if(length(input_files)==0) stop("No .tsv.gz input files were found in the data directory.")
+sample_names <- sub("\\.tsv\\.gz$","",basename(input_files)); print(sample_names)
+
+ArrowFiles <- createArrowFiles(inputFiles=input_files,sampleNames=sample_names,minTSS=5,minFrags=550,addTileMat=TRUE,addGeneScoreMat=TRUE,force=TRUE)
+print(ArrowFiles)
+
+proj <- ArchRProject(ArrowFiles=ArrowFiles,outputDirectory=file.path(results_dir,"ArchRProject"),copyArrows=TRUE)
+print(proj)
+
+# 4. Doublet Detection and Filtering
+proj <- addDoubletScores(input=proj,k=10,knnMethod="UMAP",LSIMethod=1,force=TRUE)
+doublet_enrichment <- proj$DoubletEnrichment
+doublet_filter <- doublet_enrichment < 2
+filtered_proj <- proj[doublet_filter,]; print(filtered_proj)
+
+# 5. Initial Quality-Control Statistics
+initial_qc <- data.frame(metric=c("Number of cells","Median TSS enrichment","Median fragments"),value=c(nCells(proj),median(proj$TSSEnrichment),median(proj$nFrags)))
+print(initial_qc)
+initial_tile_dimensions <- dim(getMatrixFromProject(proj,useMatrix="TileMatrix",binarize=TRUE)); print(initial_tile_dimensions)
+initial_cells_per_sample <- table(proj$Sample); print(initial_cells_per_sample)
+
+fragment_plot <- plotFragmentSizes(proj)
+plotPDF(fragment_plot,name="Fragment_Length_Distribution",ArchRProj=proj,addDOC=FALSE)
+
+tss_plot <- plotTSSEnrichment(ArchRProj=proj,groupBy="Sample")
+plotPDF(tss_plot,name="TSS_Enrichment_by_Sample",ArchRProj=proj,addDOC=FALSE)
+
+qc_metadata <- as.data.frame(getCellColData(proj,select=c("Sample","nFrags","TSSEnrichment")))
+fragment_tss_plots <- lapply(unique(qc_metadata$Sample),function(sample_name) {
+  sample_data <- qc_metadata[qc_metadata$Sample==sample_name,]
+  ggplot(sample_data,aes(x=nFrags,y=TSSEnrichment))+geom_point(alpha=0.35,size=0.6)+scale_x_log10()+theme_minimal()+labs(title=sample_name,x="Number of fragments",y="TSS enrichment")
+})
+plotPDF(plotList=fragment_tss_plots,name="Fragments_vs_TSS_by_Sample",ArchRProj=proj,addDOC=FALSE,width=6,height=4)
+
+# 6. Final Quality Filtering
+strict_filtered_proj <- filtered_proj[filtered_proj$TSSEnrichment>8 & filtered_proj$nFrags>3000,]
+print(strict_filtered_proj)
+
+final_qc <- data.frame(metric=c("Number of cells","Median TSS enrichment","Median fragments"),value=c(nCells(strict_filtered_proj),median(strict_filtered_proj$TSSEnrichment),median(strict_filtered_proj$nFrags)))
+print(final_qc)
+write.csv(final_qc,file=file.path(results_dir,"final_QC_summary.csv"),row.names=FALSE)
+
+final_cells_per_sample <- table(strict_filtered_proj$Sample); print(final_cells_per_sample)
+write.csv(as.data.frame(final_cells_per_sample),file=file.path(results_dir,"final_cells_per_sample.csv"),row.names=FALSE)
+final_tile_dimensions <- dim(getMatrixFromProject(strict_filtered_proj,useMatrix="TileMatrix",binarize=TRUE)); print(final_tile_dimensions)
+
+# 7. Peak Calling
+proj_peaks <- strict_filtered_proj
+
+pathToMacs2 <- tryCatch(findMacs2(),error=function(e) "")
+if(!nzchar(pathToMacs2)||!file.exists(pathToMacs2)) stop("MACS2 was not found. Please install MACS2 and make it available to ArchR.")
+print(pathToMacs2)
+
+proj_peaks <- addGroupCoverages(ArchRProj=proj_peaks,groupBy="Sample",force=TRUE)
+proj_peaks <- addReproduciblePeakSet(ArchRProj=proj_peaks,groupBy="Sample",peakMethod="Macs2",pathToMacs2=pathToMacs2,force=TRUE)
+proj_peaks <- addPeakMatrix(proj_peaks,force=TRUE)
+print(getAvailableMatrices(proj_peaks))
+peak_matrix <- getMatrixFromProject(proj_peaks,useMatrix="PeakMatrix"); print(peak_matrix)
+print(length(getPeakSet(proj_peaks)))
+
+# 8. Dimensionality Reduction
+proj_peaks <- addIterativeLSI(ArchRProj=proj_peaks,useMatrix="TileMatrix",name="IterativeLSI",iterations=2,clusterParams=list(resolution=0.2,sampleCells=10000,n.start=10),varFeatures=25000,dimsToUse=lsi_dims,force=TRUE)
+
+proj_peaks <- addUMAP(ArchRProj=proj_peaks,reducedDims="IterativeLSI",name="UMAP",dimsToUse=downstream_lsi_dims,nNeighbors=30,minDist=0.5,metric="cosine",force=TRUE)
+
+umap_sample <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="Sample",embedding="UMAP")
+umap_tss <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="TSSEnrichment",embedding="UMAP")
+umap_fragments <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="nFrags",embedding="UMAP")
+plotPDF(plotList=list(umap_sample,umap_tss,umap_fragments),name="UMAP_QC",ArchRProj=proj_peaks,addDOC=FALSE)
+
+# 9. Batch Correction and Clustering
+proj_peaks <- addHarmony(ArchRProj=proj_peaks,reducedDims="IterativeLSI",dimsToUse=downstream_lsi_dims,name="Harmony",groupBy="Sample",force=TRUE)
+proj_peaks <- addUMAP(ArchRProj=proj_peaks,reducedDims="Harmony",name="UMAP_Harmony",nNeighbors=30,minDist=0.5,metric="cosine",force=TRUE)
+
+umap_harmony_sample <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="Sample",embedding="UMAP_Harmony")
+umap_harmony_tss <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="TSSEnrichment",embedding="UMAP_Harmony")
+umap_harmony_fragments <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="nFrags",embedding="UMAP_Harmony")
+plotPDF(plotList=list(umap_harmony_sample,umap_harmony_tss,umap_harmony_fragments),name="UMAP_Harmony_QC",ArchRProj=proj_peaks,addDOC=FALSE)
+
+proj_peaks <- addClusters(input=proj_peaks,reducedDims="Harmony",dimsToUse=downstream_lsi_dims,method="Seurat",name="Clusters",resolution=0.8,seed=42,force=TRUE)
+cluster_umap <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="Clusters",embedding="UMAP_Harmony")
+plotPDF(cluster_umap,name="UMAP_Clusters",ArchRProj=proj_peaks,addDOC=FALSE)
+
+cluster_cell_counts <- table(proj_peaks$Clusters); print(cluster_cell_counts)
+cluster_sample_composition <- table(proj_peaks$Clusters,proj_peaks$Sample); print(cluster_sample_composition)
+write.csv(as.data.frame(cluster_cell_counts),file=file.path(results_dir,"cluster_cell_counts.csv"),row.names=FALSE)
+write.csv(as.data.frame(cluster_sample_composition),file=file.path(results_dir,"cluster_sample_composition.csv"),row.names=FALSE)
+
+# 10. Cluster-Specific Accessible Regions
+marker_peaks <- getMarkerFeatures(ArchRProj=proj_peaks,useMatrix="PeakMatrix",groupBy="Clusters",bias=c("TSSEnrichment","nFrags"),testMethod="wilcoxon")
+marker_peak_list <- getMarkers(marker_peaks,cutOff="FDR <= 0.01 & Log2FC >= 1"); print(marker_peak_list)
+
+marker_peak_heatmap <- plotMarkerHeatmap(seMarker=marker_peaks,cutOff="FDR <= 0.01 & Log2FC >= 1",transpose=TRUE)
+plotPDF(marker_peak_heatmap,name="Cluster_Marker_Peak_Heatmap",ArchRProj=proj_peaks,addDOC=FALSE,width=8,height=8)
+
+gene_tracks <- plotBrowserTrack(ArchRProj=proj_peaks,groupBy="Clusters",geneSymbol=genes_of_interest,upstream=50000,downstream=50000,loops=NULL)
+plotPDF(plotList=gene_tracks,name="Marker_Gene_Accessibility_Tracks",ArchRProj=proj_peaks,addDOC=FALSE,width=8,height=8)
+
+# 11. Gene Activity and Marker Genes
+if(!"GeneScoreMatrix" %in% getAvailableMatrices(proj_peaks)) proj_peaks <- addGeneScoreMatrix(ArchRProj=proj_peaks,matrixName="GeneScoreMatrix",force=TRUE)
+gene_score_matrix <- getMatrixFromProject(ArchRProj=proj_peaks,useMatrix="GeneScoreMatrix"); print(gene_score_matrix)
+
+marker_genes_results <- getMarkerFeatures(ArchRProj=proj_peaks,useMatrix="GeneScoreMatrix",groupBy="Clusters",bias=c("TSSEnrichment","log10(nFrags)"),testMethod="wilcoxon")
+marker_gene_list <- getMarkers(seMarker=marker_genes_results,cutOff="FDR <= 0.05 & Log2FC >= 1"); print(marker_gene_list)
+
+# 12. Gene Activity Visualization with MAGIC
+top_marker_genes <- unique(unlist(lapply(marker_gene_list,function(x) head(x$name,5))))
+top_marker_genes <- head(top_marker_genes,5); print(top_marker_genes)
+
+umap_gene_activity <- plotEmbedding(ArchRProj=proj_peaks,colorBy="GeneScoreMatrix",name=top_marker_genes,embedding="UMAP_Harmony")
+plotPDF(plotList=umap_gene_activity,name="Marker_Gene_Activity_UMAP",ArchRProj=proj_peaks,addDOC=FALSE)
+
+proj_peaks <- addImputeWeights(ArchRProj=proj_peaks,reducedDims="Harmony",dimsToUse=downstream_lsi_dims,seed=42)
+impute_weights <- getImputeWeights(proj_peaks)
+
+umap_gene_activity_magic <- plotEmbedding(ArchRProj=proj_peaks,colorBy="GeneScoreMatrix",name=top_marker_genes,embedding="UMAP_Harmony",imputeWeights=impute_weights)
+plotPDF(plotList=umap_gene_activity_magic,name="Marker_Gene_Activity_UMAP_MAGIC",ArchRProj=proj_peaks,addDOC=FALSE)
+
+# 13. Transcription-Factor Motif Activity
+proj_peaks <- addMotifAnnotations(ArchRProj=proj_peaks,motifSet="cisbp",name="Motif",force=TRUE)
+print(getPeakAnnotation(proj_peaks,"Motif"))
+proj_peaks <- addBgdPeaks(ArchRProj=proj_peaks,force=TRUE)
+proj_peaks <- addDeviationsMatrix(ArchRProj=proj_peaks,peakAnnotation="Motif",force=TRUE)
+
+variable_motifs <- getVarDeviations(ArchRProj=proj_peaks,name="MotifMatrix",plot=FALSE)
+top_variable_motifs <- head(variable_motifs,2); top_variable_motif_names <- top_variable_motifs$name; print(top_variable_motif_names)
+
+motif_features <- getFeatures(proj_peaks,select=paste(top_variable_motif_names,collapse="|"),useMatrix="MotifMatrix")
+top_variable_z_motifs <- grep("^z:",motif_features,value=TRUE); print(top_variable_z_motifs)
+
+motif_umap <- plotEmbedding(ArchRProj=proj_peaks,colorBy="MotifMatrix",name=top_variable_z_motifs,embedding="UMAP_Harmony")
+plotPDF(plotList=motif_umap,name="Top_Variable_TF_Motif_Activity",ArchRProj=proj_peaks,addDOC=FALSE)
+
+motif_activity_plots <- lapply(top_variable_z_motifs,function(motif) plotGroups(ArchRProj=proj_peaks,groupBy="Clusters",colorBy="MotifMatrix",name=motif,plotAs="violin"))
+plotPDF(plotList=motif_activity_plots,name="Top_Variable_Motif_Activity_by_Cluster",ArchRProj=proj_peaks,addDOC=FALSE)
+
+# 14. Integration with scRNA-seq
+seurat_data <- readRDS("data/blish_awilk_seu_subset.rds")
+print(seurat_data); print(colnames(seurat_data@meta.data))
+
+proj_peaks <- addGeneIntegrationMatrix(ArchRProj=proj_peaks,useMatrix="GeneScoreMatrix",matrixName="GeneIntegrationMatrix",reducedDims="Harmony",dimsToUse=downstream_lsi_dims,seRNA=seurat_data,groupRNA="cell.type",nameCell="predictedCell",nameGroup="predictedGroup",nameScore="predictedScore",addToArrow=TRUE,force=TRUE)
+
+integration_umap <- plotEmbedding(ArchRProj=proj_peaks,colorBy="GeneIntegrationMatrix",name=integration_genes,embedding="UMAP_Harmony")
+plotPDF(plotList=integration_umap,name="RNA_Expression_on_ATAC_UMAP",ArchRProj=proj_peaks,addDOC=FALSE)
+
+# 15. Gene Activity versus Gene Expression
+cor_results <- correlateMatrices(ArchRProj=proj_peaks,useMatrix1="GeneIntegrationMatrix",useMatrix2="GeneScoreMatrix",reducedDims="Harmony",dimsToUse=downstream_lsi_dims)
+print(head(cor_results))
+
+highest_agreement <- cor_results[which.max(cor_results$cor),]
+lowest_agreement <- cor_results[which.min(cor_results$cor),]
+print("Highest agreement:"); print(highest_agreement)
+print("Lowest agreement:"); print(lowest_agreement)
+
+write.csv(as.data.frame(cor_results),file=file.path(results_dir,"ATAC_RNA_gene_correlations.csv"),row.names=FALSE)
+
+# 16. RNA-Derived Cell-Type Labels
+rna_label_umap <- plotEmbedding(ArchRProj=proj_peaks,colorBy="cellColData",name="predictedGroup",embedding="UMAP_Harmony")
+plotPDF(rna_label_umap,name="RNA_Inferred_Cell_Types",ArchRProj=proj_peaks,addDOC=FALSE)
+
+confusion_matrix <- table(ATAC_Clusters=proj_peaks$Clusters,RNA_Labels=proj_peaks$predictedGroup)
+print(confusion_matrix)
+write.csv(as.data.frame(confusion_matrix),file=file.path(results_dir,"ATAC_RNA_confusion_matrix.csv"),row.names=FALSE)
+
+cluster_label_map <- apply(confusion_matrix,1,function(x) { if(sum(x)==0) return(NA_character_); names(x)[which.max(x)] })
+proj_peaks$CellType <- unname(cluster_label_map[as.character(proj_peaks$Clusters)])
+print(table(proj_peaks$Clusters,proj_peaks$CellType))
+
+# 17. Peak-to-Gene Linkage
+proj_peaks <- addPeak2GeneLinks(ArchRProj=proj_peaks,reducedDims="Harmony",dimsToUse=downstream_lsi_dims,useMatrix="GeneIntegrationMatrix",corCutOff=0.75,force=TRUE)
+peak_gene_links <- getPeak2GeneLinks(ArchRProj=proj_peaks,corCutOff=0.5,resolution=10000); print(peak_gene_links)
+
+peak_gene_heatmap <- plotPeak2GeneHeatmap(ArchRProj=proj_peaks)
+plotPDF(peak_gene_heatmap,name="Peak_to_Gene_Linkage",ArchRProj=proj_peaks,addDOC=FALSE,width=8,height=8)
+
+# 18. COVID versus Healthy Differential Accessibility
 condition_map <- c(
-  "ATAC_555_2_fragments_fragments"        = "COVID",
-  "ATAC_557_fragments_fragments"          = "COVID",
-  "ATAC_EV08_fragments_fragments"         = "Healthy",
-  "ATAC_HIP02_frozen_fragments_fragments" = "Healthy"
-)
-proj_peaks$Condition <- condition_map[proj_peaks$Sample]
-table(proj_peaks$Condition)
-table(proj_peaks$Condition, proj_peaks$Sample)
-
-diff_peaks <- getMarkerFeatures( #differential accessibility betw covid and healthy
-  ArchRProj = proj_peaks,
-  useMatrix = "PeakMatrix",
-  groupBy = "Condition",                  #covid vs healthy
-  bias = c("TSSEnrichment", "log10(nFrags)"),
-  testMethod = "wilcoxon"
+  "ATAC_555_2_fragments_fragments"="COVID",
+  "ATAC_557_fragments_fragments"="COVID",
+  "ATAC_EV08_fragments_fragments"="Healthy",
+  "ATAC_HIP02_frozen_fragments_fragments"="Healthy"
 )
 
-covid_peaks_relaxed <- getMarkers(
-  diff_peaks,
-  cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
-)$COVID
+proj_peaks$Condition <- unname(condition_map[as.character(proj_peaks$Sample)])
+if(any(is.na(proj_peaks$Condition))) stop("Some samples were not assigned to COVID/Healthy. Check condition_map.")
+print(table(proj_peaks$Condition)); print(table(proj_peaks$Condition,proj_peaks$Sample))
 
-healthy_peaks_relaxed <- getMarkers(
-  diff_peaks,
-  cutOff = "FDR <= 0.1 & Log2FC <= -0.5"
-)$Healthy
+differential_peaks <- getMarkerFeatures(ArchRProj=proj_peaks,useMatrix="PeakMatrix",groupBy="Condition",bias=c("TSSEnrichment","log10(nFrags)"),testMethod="wilcoxon")
 
-ma_plot <- markerPlot(
-  seMarker = diff_peaks,
-  name = "COVID",
-  cutOff = "FDR <= 0.05",
-  plotAs = "MA"
-)
-ma_plot
+covid_peaks <- getMarkers(differential_peaks,cutOff="FDR <= 0.1 & Log2FC >= 0.5")$COVID
+healthy_peaks <- getMarkers(differential_peaks,cutOff="FDR <= 0.1 & Log2FC >= 0.5")$Healthy
+print(covid_peaks); print(healthy_peaks)
 
-volcano_plot <- markerPlot(
-  seMarker = diff_peaks,
-  name = "COVID",
-  cutOff = "FDR <= 0.05",
-  plotAs = "Volcano"
-)
-volcano_plot
+ma_plot <- plotMarkers(seMarker=differential_peaks,name="COVID",cutOff="FDR <= 0.05 & abs(Log2FC) >= 0.5",plotAs="MA")
+volcano_plot <- plotMarkers(seMarker=differential_peaks,name="COVID",cutOff="FDR <= 0.05 & abs(Log2FC) >= 0.5",plotAs="Volcano")
+plotPDF(plotList=list(ma_plot,volcano_plot),name="COVID_vs_Healthy_Differential_Accessibility",ArchRProj=proj_peaks,addDOC=FALSE)
 
-nrow(covid_peaks)
-nrow(healthy_peaks)
+# 19. TF Motif Enrichment
+healthy_motif_enrichment <- peakAnnoEnrichment(seMarker=differential_peaks,ArchRProj=proj_peaks,peakAnnotation="Motif",cutOff="FDR <= 0.1 & Log2FC >= 0.5",background="bgdPeaks")
+covid_motif_enrichment <- peakAnnoEnrichment(seMarker=differential_peaks,ArchRProj=proj_peaks,peakAnnotation="Motif",cutOff="FDR <= 0.1 & Log2FC >= 0.5",background="bgdPeaks")
+print(healthy_motif_enrichment); print(covid_motif_enrichment)
 
-#9.2 TF motif enrichment
-
-getAvailableMatrices(proj_peaks) #motifMatrix must exist
-
-enrich_healthy <- peakAnnoEnrichment( #healthy enriched peaks
-  seMarker = diff_peaks,
-  ArchRProj = proj_peaks,
-  peakAnnotation = "Motif",
-  group = "Healthy",
-  cutOff = "FDR <= 0.1 & Log2FC <= -0.5" #peaks less accessible in covid, Log2FC < 0
-)
-enrich_healthy
-
-enrich_covid <- peakAnnoEnrichment( #covid enriched peaks
-  seMarker = diff_peaks,
-  ArchRProj = proj_peaks,
-  peakAnnotation = "Motif",
-  group = "COVID",
-  cutOff = "FDR <= 0.1 & Log2FC >= 0.5" #peaks more accessible in covid, Log2FC > 0
-)
-enrich_covid
-
-top_healthy_motifs <- rownames(enrich_healthy)[1:min(5, nrow(enrich_healthy))] #extract top enriched motifs
-top_covid_motifs   <- rownames(enrich_covid)[1:min(5, nrow(enrich_covid))]
-
-top_healthy_motifs
-top_covid_motifs
-
-plot_motifs <- unique(c(top_healthy_motifs, top_covid_motifs)) #combine motifs for plotting
-plot_motifs
-
-motif_umap <- plotEmbedding( #umap visualization of motif activity
-  ArchRProj = proj_peaks,
-  colorBy = "MotifMatrix",
-  name = plot_motifs,
-  embedding = "UMAP_Harmony"
-)
-motif_umap
-
-motif_heatmap <- plotGroups( #heatmap of motif activity across clusters
-  ArchRProj = proj_peaks,
-  groupBy = "Clusters_Louvain",
-  colorBy = "MotifMatrix",
-  name = plot_motifs,
-  plotAs = "heatmap"
-)
-motif_heatmap
-
-#10 TF footprinting
-
-#11 Co-accessibility
-
-getAvailableMatrices(proj_peaks)
-
-getReducedDims(proj_peaks)
-
-proj_peaks <- addCoAccessibility( #add coaccessibility scores
-  ArchRProj = proj_peaks,
-  reducedDims = "IterativeLSI"
-)
-
-coaccessibility_links <- getCoAccessibility( #extract coaccessibility links
-  ArchRProj = proj_peaks,
-  corCutOff = 0.5,          #correlation threshold
-  resolution = 10000        #10 kb resolution
-)
-coaccessibility_links[[1]]
-
-marker_genes <- c("CD14", "CD8A") #genome track plot with 2 markers
-
-for (gene in marker_genes) {
-  
-  p <- plotBrowserTrack(
-    ArchRProj = proj_peaks,
-    groupBy = "Condition",        #covid vs healthy
-    geneSymbol = gene,
-    upstream = 50000,
-    downstream = 50000,
-    loops = coaccessibility_links #add coaccessibility arcs
-  )
-  print(p[[1]])
+get_top_enriched_motifs <- function(enrichment_result,n=5) {
+  if(nrow(enrichment_result)==0) return(character(0))
+  enrichment_scores <- assay(enrichment_result,"mlog10Padj")
+  if(is.null(dim(enrichment_scores))) enrichment_scores <- as.numeric(enrichment_scores) else enrichment_scores <- enrichment_scores[,1]
+  valid <- !is.na(enrichment_scores)
+  motif_names <- rownames(enrichment_result)[valid]
+  enrichment_scores <- enrichment_scores[valid]
+  motif_names[order(enrichment_scores,decreasing=TRUE)][seq_len(min(n,length(motif_names)))]
 }
-p
 
-grid::grid.newpage()
-grid::grid.draw(p[[1]])
+top_healthy_motifs <- get_top_enriched_motifs(healthy_motif_enrichment,n=5)
+top_covid_motifs <- get_top_enriched_motifs(covid_motif_enrichment,n=5)
+print(top_healthy_motifs); print(top_covid_motifs)
 
-#11.2 Identify potential enhancers for marker genes
+motifs_for_visualisation <- unique(c(top_healthy_motifs,top_covid_motifs))
 
-marker_genes <- c(
-  "CD34", "GATA1", "PAX5", "MS4A1", "MME",
-  "CD14", "MPO", "IRF8", "CD3D", "CD8A",
-  "CD4", "TBX21", "CD3G", "NCAM1", "FCGR3A",
-  "FOXP3", "GATA3", "RORC", "PDCD1", "HLA-DRA",
-  "CD28", "IL2RA", "CD69", "CD44", "CCR7"
+if(length(motifs_for_visualisation)>0) {
+  motif_activity_umap <- plotEmbedding(ArchRProj=proj_peaks,colorBy="MotifMatrix",name=motifs_for_visualisation,embedding="UMAP_Harmony")
+  plotPDF(plotList=motif_activity_umap,name="Condition_Associated_Motif_Activity",ArchRProj=proj_peaks,addDOC=FALSE)
+
+  motif_activity_heatmap <- plotGroups(ArchRProj=proj_peaks,groupBy="Clusters",colorBy="MotifMatrix",name=motifs_for_visualisation,plotAs="heatmap")
+  plotPDF(plotList=list(motif_activity_heatmap),name="Condition_Associated_Motif_Activity_Heatmap",ArchRProj=proj_peaks,addDOC=FALSE)
+} else message("No condition-associated motifs passed the enrichment criteria.")
+
+# 20. TF Footprinting
+if(length(motifs_for_visualisation)>0) {
+  motif_positions <- getPositions(ArchRProj=proj_peaks,name="Motif")
+  footprint_motifs <- unlist(lapply(motifs_for_visualisation,function(motif) grep(motif,names(motif_positions),value=TRUE)))
+  footprint_motifs <- unique(footprint_motifs)
+
+  if(length(footprint_motifs)>0) {
+    proj_peaks <- addGroupCoverages(ArchRProj=proj_peaks,groupBy="Condition",force=TRUE)
+    footprint_positions <- motif_positions[footprint_motifs]
+    footprint_results <- getFootprints(ArchRProj=proj_peaks,positions=footprint_positions,groupBy="Condition",useGroups=c("COVID","Healthy"),minCells=25)
+    footprint_plot <- plotFootprints(seFoot=footprint_results,ArchRProj=proj_peaks,normMethod="Subtract",smoothWindow=5,addDOC=FALSE,plot=TRUE)
+  } else message("No matching motif positions were available for footprinting.")
+} else message("Condition-specific footprinting was not performed because no significant condition-associated motifs were identified.")
+
+# 21. Co-accessibility
+proj_peaks <- addCoAccessibility(ArchRProj=proj_peaks,reducedDims="IterativeLSI",dimsToUse=downstream_lsi_dims,force=TRUE)
+coaccessibility_links <- getCoAccessibility(ArchRProj=proj_peaks,corCutOff=0.5,resolution=10000); print(coaccessibility_links)
+
+coaccessibility_marker_genes <- c("CD14","CD8A")
+coaccessibility_tracks <- plotBrowserTrack(ArchRProj=proj_peaks,groupBy="Condition",geneSymbol=coaccessibility_marker_genes,upstream=50000,downstream=50000,loops=coaccessibility_links)
+plotPDF(plotList=coaccessibility_tracks,name="CoAccessibility_Marker_Genes",ArchRProj=proj_peaks,addDOC=FALSE,width=8,height=8)
+
+# 22. Potential Regulatory Elements
+regulatory_tracks <- plotBrowserTrack(ArchRProj=proj_peaks,groupBy="Condition",geneSymbol=marker_genes,upstream=50000,downstream=50000,loops=coaccessibility_links)
+plotPDF(plotList=regulatory_tracks,name="Marker_Gene_Regulatory_Elements",ArchRProj=proj_peaks,addDOC=FALSE,width=8,height=8)
+
+# 23. Final Analysis Summary
+final_summary <- data.frame(
+  metric=c("Final cells","Final median TSS enrichment","Final median fragments","Number of clusters","Number of peak features","Number of gene features"),
+  value=c(nCells(proj_peaks),median(proj_peaks$TSSEnrichment),median(proj_peaks$nFrags),length(unique(proj_peaks$Clusters)),length(getPeakSet(proj_peaks)),nrow(getMatrixFromProject(proj_peaks,useMatrix="GeneScoreMatrix")))
 )
+print(final_summary)
+write.csv(final_summary,file=file.path(results_dir,"final_analysis_summary.csv"),row.names=FALSE)
 
-proj_peaks <- addCoAccessibility(
-  ArchRProj = proj_peaks,
-  reducedDims = "IterativeLSI"
-)
+# 24. Save Final ArchR Project
+# Optional: save the complete final ArchR project locally.
+# Keep commented for GitHub because the ArchR project can be very large.
+# proj_peaks <- saveArchRProject(ArchRProj=proj_peaks,outputDirectory=file.path(results_dir,"ArchRProject_Final"),load=TRUE)
 
-coaccessibility_links <- getCoAccessibility(
-  ArchRProj = proj_peaks,
-  corCutOff = 0.5,      # significant links only
-  resolution = 10000   # 10 kb bins
-)
-
-browser_tracks <- plotBrowserTrack(
-  ArchRProj  = proj_peaks,
-  groupBy    = "Condition",     # COVID vs Healthy
-  geneSymbol = marker_genes,
-  upstream   = 50000,
-  downstream = 50000,
-  loops      = coaccessibility_links
-)
-
-grid::grid.draw(browser_tracks$CD14) 
-grid::grid.draw(browser_tracks$CD8A)
-
-plotPDF(
-  plotList   = browser_tracks,
-  name       = "11.2_Marker_Genes_CoAccessibility.pdf",
-  ArchRProj  = proj_peaks,
-  addDOC     = FALSE,
-  width      = 6,
-  height     = 6
-)
-
-
-
+# 25. Session Information
+sessionInfo()
